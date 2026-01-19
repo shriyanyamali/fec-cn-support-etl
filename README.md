@@ -14,8 +14,6 @@
 10. [Installation and Setup](#installation-and-setup)
 11. [How to Use](#how-to-use)
 12. [Validation](#validation)
-13. [Known Limitations](#known-limitations)
-14. [Methodology Notes](#methodology-notes)
 
 ---
 
