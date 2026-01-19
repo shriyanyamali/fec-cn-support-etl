@@ -1,4 +1,4 @@
-# FEC Campaign Finance Pipeline: Comprehensive Documentation
+# FEC Candidate Support Data ETL
 
 ## Table of Contents
 
