@@ -1,4 +1,4 @@
-## 00
+## 01
 
 from pathlib import Path
 import re
@@ -58,13 +58,45 @@ CCL_DIR = CYCLE_DIR / f"ccl{SUFFIX}"
 INDIV_DIR = CYCLE_DIR / f"indiv{SUFFIX}"
 PAS2_DIR = CYCLE_DIR / f"pas2{SUFFIX}"
 
-# Output folder (always inside cycle folder)
+# Output folders - now with subfolders for each office type
 OUT_DIR = CYCLE_DIR / "outputs"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+SENATE_OUT_DIR = OUT_DIR / "senate"
+SENATE_OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+PRESIDENTIAL_OUT_DIR = OUT_DIR / "presidential"
+PRESIDENTIAL_OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+TOTAL_OUT_DIR = OUT_DIR / "total"
+TOTAL_OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # Behavior
 VALID_OFFICES = {"S", "P"}    # ✅ Senate + Presidential only (no House)
 CHUNKSIZE = 2_000_000
+
+# Helper function to get output directory based on office filter
+def get_output_dir(office_filter):
+    """Return appropriate output directory based on office filter."""
+    if office_filter == {"S"}:
+        return SENATE_OUT_DIR
+    elif office_filter == {"P"}:
+        return PRESIDENTIAL_OUT_DIR
+    elif office_filter == {"S", "P"}:
+        return TOTAL_OUT_DIR
+    else:
+        raise ValueError(f"Invalid office_filter: {office_filter}")
+
+def get_output_prefix(office_filter):
+    """Return appropriate filename prefix based on office filter."""
+    if office_filter == {"S"}:
+        return "senate"
+    elif office_filter == {"P"}:
+        return "presidential"
+    elif office_filter == {"S", "P"}:
+        return "total"
+    else:
+        raise ValueError(f"Invalid office_filter: {office_filter}")
 
 # ---- File schemas ----
 CM_COLS = [

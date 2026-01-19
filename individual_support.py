@@ -2,7 +2,7 @@
 
 import pandas as pd
 from pathlib import Path
-from config import TARGET_ELECTION_YR, write_csv_no_blank_line
+from config import TARGET_ELECTION_YR, write_csv_no_blank_line, get_output_dir, get_output_prefix
 
 def _find_file(folder: Path, startswith: str) -> Path:
     for ext in ("*.txt", "*.dat"):
@@ -26,14 +26,20 @@ def _build_cmte_to_cand(ccl: pd.DataFrame) -> dict:
     chosen = ccl.dropna(subset=["CMTE_ID", "CAND_ID"]).drop_duplicates("CMTE_ID", keep="first")
     return dict(zip(chosen["CMTE_ID"], chosen["CAND_ID"]))
 
-def main(cfg=None):
+def main(office_filter=None, cfg=None):
+    """
+    Generate individual contribution support data.
+    
+    Args:
+        office_filter: Set of office codes to include (e.g., {'S'}, {'P'}, or {'S', 'P'})
+        cfg: Optional config dict (for testing/flexibility)
+    """
     if cfg is None:
-        from config import CCL_DIR, CN_DIR, INDIV_DIR, OUT_DIR, CCL_COLS, CN_COLS, INDIV_COLS, SUFFIX, VALID_OFFICES, CHUNKSIZE
+        from config import CCL_DIR, CN_DIR, INDIV_DIR, CCL_COLS, CN_COLS, INDIV_COLS, SUFFIX, VALID_OFFICES, CHUNKSIZE
     else:
         CCL_DIR = cfg['CCL_DIR']
         CN_DIR = cfg['CN_DIR']
         INDIV_DIR = cfg['INDIV_DIR']
-        OUT_DIR = cfg['OUT_DIR']
         CCL_COLS = cfg['CCL_COLS']
         CN_COLS = cfg['CN_COLS']
         INDIV_COLS = cfg['INDIV_COLS']
@@ -41,31 +47,43 @@ def main(cfg=None):
         VALID_OFFICES = cfg['VALID_OFFICES']
         CHUNKSIZE = cfg['CHUNKSIZE']
     
+    # Use provided office_filter or default to all valid offices
+    if office_filter is None:
+        office_filter = VALID_OFFICES
+    office_filter = set(office_filter)  # Ensure it's a set
+    
+    # Get appropriate output directory and prefix
+    out_dir = get_output_dir(office_filter)
+    prefix = get_output_prefix(office_filter)
+    
     ccl_path = _find_file(CCL_DIR, "ccl")
     cn_path = _find_file(CN_DIR, "cn")
     indiv_path = _find_file(INDIV_DIR, "itcont")
 
-    print("[individual_support] Loading ccl linkage:", ccl_path)
+    print(f"[individual_support][{prefix}] Loading ccl linkage:", ccl_path)
     ccl = pd.read_csv(ccl_path, sep="|", header=None, names=CCL_COLS, dtype=str, encoding_errors="ignore")
     cmte_to_cand = _build_cmte_to_cand(ccl)
 
-    print("[individual_support] Loading candidate master:", cn_path)
+    print(f"[individual_support][{prefix}] Loading candidate master:", cn_path)
 
     cn = pd.read_csv(cn_path, sep="|", header=None, names=CN_COLS, dtype=str, encoding_errors="ignore")
-    cn = cn[cn["CAND_OFFICE"].isin(VALID_OFFICES)].copy()
+    
+    # Filter to specified offices
+    cn = cn[cn["CAND_OFFICE"].isin(office_filter)].copy()
+    print(f"[individual_support][{prefix}] After office filter {sorted(office_filter)}: {len(cn):,} candidates")
 
     # Election-year restriction
     cn["CAND_ELECTION_YR"] = cn["CAND_ELECTION_YR"].astype(str).str.extract(r"(\d{4})", expand=False)
     before = len(cn)
     cn = cn[cn["CAND_ELECTION_YR"] == TARGET_ELECTION_YR].copy()
-    print(f"[individual_support] cn after year filter {TARGET_ELECTION_YR}: {before:,} -> {len(cn):,}")
+    print(f"[individual_support][{prefix}] After year filter {TARGET_ELECTION_YR}: {before:,} -> {len(cn):,}")
 
     valid_cand_ids = set(cn["CAND_ID"].dropna().unique())
     cn_index = cn.set_index("CAND_ID")
 
     totals = {}
 
-    print("[individual_support] Streaming itcont:", indiv_path)
+    print(f"[individual_support][{prefix}] Streaming itcont:", indiv_path)
     reader = pd.read_csv(
         indiv_path, sep="|", header=None, names=INDIV_COLS,
         dtype=str, chunksize=CHUNKSIZE, encoding_errors="ignore",
@@ -83,7 +101,7 @@ def main(cfg=None):
         if chunk.empty:
             continue
 
-        # ✅ Drop House by keeping only valid Senate/Pres candidates
+        # Filter to valid candidates for this office type
         chunk = chunk[chunk["CAND_ID"].isin(valid_cand_ids)]
         if chunk.empty:
             continue
@@ -101,7 +119,7 @@ def main(cfg=None):
             totals[cand_id] = totals.get(cand_id, 0.0) + float(val)
 
         if i % 5 == 0:
-            print(f"[individual_support] chunks: {i:,} | candidates so far: {len(totals):,}")
+            print(f"[individual_support][{prefix}] chunks: {i:,} | candidates so far: {len(totals):,}")
 
     rows = [{"CAND_ID": k, "INDIVIDUAL_SUPPORT": v} for k, v in totals.items()]
     out = (
@@ -110,9 +128,10 @@ def main(cfg=None):
           .sort_values("INDIVIDUAL_SUPPORT", ascending=False)
     )
 
-    out_path = OUT_DIR / f"individual_support_{SUFFIX}.csv"
+    from config import SUFFIX
+    out_path = out_dir / f"{prefix}_individual_support_{SUFFIX}.csv"
     write_csv_no_blank_line(out, out_path, index=False)
-    print("[individual_support] Wrote:", out_path)
+    print(f"[individual_support][{prefix}] Wrote:", out_path)
 
 if __name__ == "__main__":
     main()
