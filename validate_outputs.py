@@ -1,7 +1,5 @@
 """
-Comprehensive validation script for FEC campaign finance pipeline outputs.
-
-This script performs multiple checks to ensure data quality and correctness:
+Checks for:
 1. File existence and structure
 2. No duplicate candidates
 3. Office filter accuracy
@@ -68,11 +66,11 @@ class ValidationReport:
         
         print("\n" + "="*80)
         if not self.error_messages and not self.warning_messages:
-            print("✅ ALL VALIDATIONS PASSED - DATA LOOKS GOOD!")
+            print("✅ ALL VALIDATIONS PASSED")
         elif not self.error_messages:
-            print("⚠️  PASSED WITH WARNINGS - Review warnings above")
+            print("⚠️  PASSED WITH WARNINGS")
         else:
-            print("❌ VALIDATION FAILED - Review errors above")
+            print("❌ VALIDATION FAILED")
         print("="*80 + "\n")
         
         return len(self.error_messages) == 0
