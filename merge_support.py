@@ -1,51 +1,76 @@
 ## 05
 
 import pandas as pd
-from config import OUT_DIR, CN_DIR, CN_COLS, SENATE_ONLY
+from pathlib import Path
+from config import OUT_DIR, CN_DIR, CN_COLS, VALID_OFFICES
+
+def _find_file(folder: Path, startswith: str) -> Path:
+    for ext in ("*.txt", "*.dat"):
+        for p in folder.glob(ext):
+            if p.name.lower().startswith(startswith.lower()):
+                return p
+    cands = list(folder.glob("*.txt")) + list(folder.glob("*.dat"))
+    if not cands:
+        raise FileNotFoundError(f"No data files found in {folder}")
+    return max(cands, key=lambda p: p.stat().st_size)
+
+def _safe_read_csv(path: Path, cols: list, dtypes=None) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame(columns=cols)
+    df = pd.read_csv(path, dtype=dtypes)
+    for c in cols:
+        if c not in df.columns:
+            df[c] = pd.Series(dtype="float64" if c != "CAND_ID" else "object")
+    return df[cols]
 
 def main():
-    # Inputs
     superpac_path = OUT_DIR / "superpac_ie_support.csv"
     indiv_path = OUT_DIR / "individual_support.csv"
     pac_path = OUT_DIR / "pac_support_corp_nonconnected.csv"
-    cn_path = CN_DIR / "cn.txt"
+
+    cn_path = _find_file(CN_DIR, "cn")
 
     print("[merge_support] Reading:")
-    print("  ", cn_path)
-    print("  ", superpac_path)
-    print("  ", indiv_path)
-    print("  ", pac_path)
+    print("  cn:", cn_path)
+    print("  superpac:", superpac_path)
+    print("  indiv:", indiv_path)
+    print("  pac:", pac_path)
 
-    # Candidate labels (authoritative)
     cn = pd.read_csv(
         cn_path, sep="|", header=None, names=CN_COLS,
         dtype=str, encoding_errors="ignore"
     )
-    if SENATE_ONLY:
-        cn = cn[cn["CAND_OFFICE"] == "S"].copy()
+
+    # ✅ Restrict universe to Senate + Presidential (no House)
+    cn = cn[cn["CAND_OFFICE"].isin(VALID_OFFICES)].copy()
 
     cn_labels = cn[
         ["CAND_ID", "CAND_NAME", "CAND_PTY_AFFILIATION", "CAND_OFFICE", "CAND_OFFICE_ST"]
     ].drop_duplicates("CAND_ID")
 
-    # Support files
-    superpac = pd.read_csv(superpac_path, dtype={"CAND_ID": str})
-    indiv = pd.read_csv(indiv_path, dtype={"CAND_ID": str})
-    pac = pd.read_csv(pac_path, dtype={"CAND_ID": str})
-
-    superpac_key = superpac[["CAND_ID", "SUPERPAC_IE_SUPPORT"]]
-    indiv_key = indiv[["CAND_ID", "INDIVIDUAL_SUPPORT"]]
-    pac_key = pac[["CAND_ID", "CORP_PAC_SUPPORT", "NONCONNECTED_PAC_SUPPORT"]]
-
-    # Merge from cn_labels so every Senate candidate is represented
-    merged = (
-        cn_labels
-        .merge(indiv_key, on="CAND_ID", how="left")
-        .merge(pac_key, on="CAND_ID", how="left")
-        .merge(superpac_key, on="CAND_ID", how="left")
+    superpac = _safe_read_csv(
+        superpac_path,
+        cols=["CAND_ID", "SUPERPAC_IE_SUPPORT"],
+        dtypes={"CAND_ID": str}
+    )
+    indiv = _safe_read_csv(
+        indiv_path,
+        cols=["CAND_ID", "INDIVIDUAL_SUPPORT"],
+        dtypes={"CAND_ID": str}
+    )
+    pac = _safe_read_csv(
+        pac_path,
+        cols=["CAND_ID", "CORP_PAC_SUPPORT", "NONCONNECTED_PAC_SUPPORT"],
+        dtypes={"CAND_ID": str}
     )
 
-    # Fill numeric columns
+    merged = (
+        cn_labels
+        .merge(indiv, on="CAND_ID", how="left")
+        .merge(pac, on="CAND_ID", how="left")
+        .merge(superpac, on="CAND_ID", how="left")
+    )
+
     support_cols = [
         "INDIVIDUAL_SUPPORT",
         "CORP_PAC_SUPPORT",
@@ -58,17 +83,11 @@ def main():
     merged["TOTAL_SUPPORT"] = merged[support_cols].sum(axis=1)
     merged["HAS_MONEY"] = (merged["TOTAL_SUPPORT"] > 0).astype(int)
 
-    # ---------- SORTING RULE ----------
-    # Alphabetical by state, then descending by money
-    sort_cols = ["CAND_OFFICE_ST", "TOTAL_SUPPORT"]
-    sort_orders = [True, False]
-
-    merged_sorted = merged.sort_values(sort_cols, ascending=sort_orders)
+    merged_sorted = merged.sort_values(["CAND_OFFICE_ST", "TOTAL_SUPPORT"], ascending=[True, False])
 
     with_money = merged_sorted[merged_sorted["HAS_MONEY"] == 1].copy()
     no_money = merged_sorted[merged_sorted["HAS_MONEY"] == 0].copy()
 
-    # Outputs
     out_with_money = OUT_DIR / "final_support_table.csv"
     out_no_money = OUT_DIR / "candidates_no_support.csv"
     out_all_flag = OUT_DIR / "candidates_all_with_flag.csv"
@@ -89,7 +108,7 @@ def main():
         f"total={len(merged_sorted):,}"
     )
 
-    print("\n[merge_support] Preview (AL → AK → …):")
+    print("\n[merge_support] Preview:")
     print(with_money.head(25).to_string(index=False))
 
 if __name__ == "__main__":

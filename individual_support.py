@@ -3,7 +3,7 @@
 import pandas as pd
 from pathlib import Path
 from config import (
-    CCL_DIR, CN_DIR, INDIV_DIR, OUT_DIR, SENATE_ONLY, CHUNKSIZE,
+    CCL_DIR, CN_DIR, INDIV_DIR, OUT_DIR, VALID_OFFICES, CHUNKSIZE,
     CCL_COLS, CN_COLS, INDIV_COLS
 )
 
@@ -17,22 +17,32 @@ def _find_file(folder: Path, startswith: str) -> Path:
         raise FileNotFoundError(f"No data files found in {folder}")
     return max(cands, key=lambda p: p.stat().st_size)
 
+def _build_cmte_to_cand(ccl: pd.DataFrame) -> dict:
+    """
+    Deterministic mapping CMTE_ID -> CAND_ID.
+    Prefer CMTE_DSGN == 'P' if present, else first observed.
+    """
+    ccl = ccl.copy()
+    ccl["CMTE_DSGN"] = ccl["CMTE_DSGN"].fillna("")
+    ccl["__is_principal"] = (ccl["CMTE_DSGN"] == "P").astype(int)
+    ccl = ccl.sort_values(["CMTE_ID", "__is_principal"], ascending=[True, False])
+    chosen = ccl.dropna(subset=["CMTE_ID", "CAND_ID"]).drop_duplicates("CMTE_ID", keep="first")
+    return dict(zip(chosen["CMTE_ID"], chosen["CAND_ID"]))
+
 def main():
     ccl_path = _find_file(CCL_DIR, "ccl")
     cn_path = _find_file(CN_DIR, "cn")
-
-    # indiv file can be named itcont.txt or similar
     indiv_path = _find_file(INDIV_DIR, "itcont")
 
     print("[individual_support] Loading ccl linkage:", ccl_path)
     ccl = pd.read_csv(ccl_path, sep="|", header=None, names=CCL_COLS, dtype=str, encoding_errors="ignore")
-    # Many committees link to a candidate; keep mapping for all.
-    cmte_to_cand = dict(zip(ccl["CMTE_ID"], ccl["CAND_ID"]))
+    cmte_to_cand = _build_cmte_to_cand(ccl)
 
     print("[individual_support] Loading candidate master:", cn_path)
     cn = pd.read_csv(cn_path, sep="|", header=None, names=CN_COLS, dtype=str, encoding_errors="ignore")
-    if SENATE_ONLY:
-        cn = cn[cn["CAND_OFFICE"] == "S"]
+
+    # ✅ Restrict universe to Senate + Presidential (no House)
+    cn = cn[cn["CAND_OFFICE"].isin(VALID_OFFICES)].copy()
     valid_cand_ids = set(cn["CAND_ID"].dropna().unique())
     cn_index = cn.set_index("CAND_ID")
 
@@ -45,7 +55,6 @@ def main():
     )
 
     for i, chunk in enumerate(reader, start=1):
-        # Individual contribution records
         chunk = chunk[(chunk["TRANSACTION_TP"] == "15") & (chunk["ENTITY_TP"] == "IND")].copy()
         if chunk.empty:
             continue
@@ -56,27 +65,29 @@ def main():
         if chunk.empty:
             continue
 
-        if SENATE_ONLY:
-            chunk = chunk[chunk["CAND_ID"].isin(valid_cand_ids)]
-            if chunk.empty:
-                continue
-
-        amt = pd.to_numeric(chunk["TRANSACTION_AMT"], errors="coerce")
-        chunk = chunk[amt.notna()]
-        amt = amt.loc[chunk.index]
-        chunk = chunk[amt > 0]  # keep positive support only
+        # ✅ Drop House by keeping only valid Senate/Pres candidates
+        chunk = chunk[chunk["CAND_ID"].isin(valid_cand_ids)]
         if chunk.empty:
             continue
 
-        grp = amt.loc[chunk.index].groupby(chunk["CAND_ID"]).sum()
+        amt = pd.to_numeric(chunk["TRANSACTION_AMT"], errors="coerce")
+        mask = amt.notna() & (amt > 0)
+        if not mask.any():
+            continue
+
+        chunk = chunk.loc[mask]
+        amt = amt.loc[mask]
+
+        grp = amt.groupby(chunk["CAND_ID"]).sum()
         for cand_id, val in grp.items():
             totals[cand_id] = totals.get(cand_id, 0.0) + float(val)
 
         if i % 5 == 0:
             print(f"[individual_support] chunks: {i:,} | candidates so far: {len(totals):,}")
 
+    rows = [{"CAND_ID": k, "INDIVIDUAL_SUPPORT": v} for k, v in totals.items()]
     out = (
-        pd.DataFrame([{"CAND_ID": k, "INDIVIDUAL_SUPPORT": v} for k, v in totals.items()])
+        pd.DataFrame(rows, columns=["CAND_ID", "INDIVIDUAL_SUPPORT"])
           .merge(cn_index, left_on="CAND_ID", right_index=True, how="left")
           .sort_values("INDIVIDUAL_SUPPORT", ascending=False)
     )

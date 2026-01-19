@@ -3,7 +3,7 @@
 import pandas as pd
 from pathlib import Path
 from config import (
-    CM_DIR, CN_DIR, PAS2_DIR, OUT_DIR, SENATE_ONLY, CHUNKSIZE,
+    CM_DIR, CN_DIR, PAS2_DIR, OUT_DIR, VALID_OFFICES, CHUNKSIZE,
     CM_COLS, CN_COLS, ITPAS2_COLS
 )
 
@@ -12,7 +12,6 @@ def _find_file(folder: Path, startswith: str) -> Path:
         for p in folder.glob(ext):
             if p.name.lower().startswith(startswith.lower()):
                 return p
-    # fallback largest
     cands = list(folder.glob("*.txt")) + list(folder.glob("*.dat"))
     if not cands:
         raise FileNotFoundError(f"No data files found in {folder}")
@@ -26,12 +25,13 @@ def main():
     print("[superpac_ie_support] Loading committee master:", cm_path)
     cm = pd.read_csv(cm_path, sep="|", header=None, names=CM_COLS, dtype=str, encoding_errors="ignore")
     superpac_ids = set(cm.loc[cm["CMTE_TP"] == "O", "CMTE_ID"].dropna().unique())
-    print(f"[superpac_ie_support] Super PAC committees (CMTE_TP='O'): {len(superpac_ids):,}")
+    print(f"[superpac_ie_support] IE-only committees (CMTE_TP='O'): {len(superpac_ids):,}")
 
     print("[superpac_ie_support] Loading candidate master:", cn_path)
     cn = pd.read_csv(cn_path, sep="|", header=None, names=CN_COLS, dtype=str, encoding_errors="ignore")
-    if SENATE_ONLY:
-        cn = cn[cn["CAND_OFFICE"] == "S"]
+
+    # ✅ Restrict universe to Senate + Presidential (no House)
+    cn = cn[cn["CAND_OFFICE"].isin(VALID_OFFICES)].copy()
     valid_cand_ids = set(cn["CAND_ID"].dropna().unique())
     cn_index = cn.set_index("CAND_ID")
 
@@ -44,32 +44,39 @@ def main():
     )
 
     for i, chunk in enumerate(reader, start=1):
-        # IE SUPPORT
+        # IE support
         chunk = chunk[chunk["TRANSACTION_TP"] == "24E"]
         if chunk.empty:
             continue
 
-        # Super PAC spenders
+        # IE-only committees
         chunk = chunk[chunk["CMTE_ID"].isin(superpac_ids)]
         if chunk.empty:
             continue
 
-        # Candidate filter
-        if SENATE_ONLY:
-            chunk = chunk[chunk["CAND_ID"].isin(valid_cand_ids)]
-            if chunk.empty:
-                continue
+        # ✅ Drop House candidates
+        chunk = chunk[chunk["CAND_ID"].isin(valid_cand_ids)]
+        if chunk.empty:
+            continue
 
-        amt = pd.to_numeric(chunk["TRANSACTION_AMT"], errors="coerce").fillna(0.0)
+        amt = pd.to_numeric(chunk["TRANSACTION_AMT"], errors="coerce")
+        mask = amt.notna() & (amt > 0)
+        if not mask.any():
+            continue
+
+        amt = amt.loc[mask]
+        chunk = chunk.loc[mask]
+
         grp = amt.groupby(chunk["CAND_ID"]).sum()
         for cand_id, val in grp.items():
             totals[cand_id] = totals.get(cand_id, 0.0) + float(val)
 
         if i % 5 == 0:
-            print(f"[superpac_ie_support] processed chunks: {i:,} | candidates so far: {len(totals):,}")
+            print(f"[superpac_ie_support] chunks: {i:,} | candidates so far: {len(totals):,}")
 
+    rows = [{"CAND_ID": k, "SUPERPAC_IE_SUPPORT": v} for k, v in totals.items()]
     out = (
-        pd.DataFrame([{"CAND_ID": k, "SUPERPAC_IE_SUPPORT": v} for k, v in totals.items()])
+        pd.DataFrame(rows, columns=["CAND_ID", "SUPERPAC_IE_SUPPORT"])
           .merge(cn_index, left_on="CAND_ID", right_index=True, how="left")
           .sort_values("SUPERPAC_IE_SUPPORT", ascending=False)
     )

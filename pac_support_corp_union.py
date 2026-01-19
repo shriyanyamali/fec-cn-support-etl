@@ -3,7 +3,7 @@
 import pandas as pd
 from pathlib import Path
 from config import (
-    CM_DIR, CN_DIR, PAS2_DIR, OUT_DIR, SENATE_ONLY, CHUNKSIZE,
+    CM_DIR, CN_DIR, PAS2_DIR, OUT_DIR, VALID_OFFICES, CHUNKSIZE,
     CM_COLS, CN_COLS, ITPAS2_COLS
 )
 
@@ -22,43 +22,53 @@ def main():
     cn_path = _find_file(CN_DIR, "cn")
     itpas2_path = _find_file(PAS2_DIR, "itpas2")
 
-    print("[pac_support_corp_union] Loading committee master:", cm_path)
+    print("[pac_support] Loading committee master:", cm_path)
     cm = pd.read_csv(cm_path, sep="|", header=None, names=CM_COLS, dtype=str, encoding_errors="ignore")
-    cm_type = cm.set_index("CMTE_ID")["CMTE_TP"].to_dict()
 
-    print("[pac_support_corp_union] Loading candidate master:", cn_path)
+    cm["CMTE_TP"] = cm["CMTE_TP"].fillna("")
+    cm["ORG_TP"] = cm["ORG_TP"].fillna("")
+
+    # Keep only PAC committees (qualified/nonqualified)
+    pac_ids = set(cm.loc[cm["CMTE_TP"].isin(["Q", "N"]), "CMTE_ID"].dropna().unique())
+    org_type = cm.set_index("CMTE_ID")["ORG_TP"].to_dict()
+    print(f"[pac_support] PAC committees (CMTE_TP in Q/N): {len(pac_ids):,}")
+
+    print("[pac_support] Loading candidate master:", cn_path)
     cn = pd.read_csv(cn_path, sep="|", header=None, names=CN_COLS, dtype=str, encoding_errors="ignore")
-    if SENATE_ONLY:
-        cn = cn[cn["CAND_OFFICE"] == "S"]
+
+    # ✅ Restrict universe to Senate + Presidential (no House)
+    cn = cn[cn["CAND_OFFICE"].isin(VALID_OFFICES)].copy()
     valid_cand_ids = set(cn["CAND_ID"].dropna().unique())
     cn_index = cn.set_index("CAND_ID")
 
     corp_totals = {}
     nonconn_totals = {}
 
-    print("[pac_support_corp_union] Streaming itpas2:", itpas2_path)
+    print("[pac_support] Streaming itpas2:", itpas2_path)
     reader = pd.read_csv(
         itpas2_path, sep="|", header=None, names=ITPAS2_COLS,
         dtype=str, chunksize=CHUNKSIZE, encoding_errors="ignore"
     )
 
     for i, chunk in enumerate(reader, start=1):
-        # Exclude independent expenditures (Super PAC IE support is handled elsewhere)
-        chunk = chunk[~chunk["TRANSACTION_TP"].isin(["24E", "24O"])]
+        # Only PAC committees
+        chunk = chunk[chunk["CMTE_ID"].isin(pac_ids)]
         if chunk.empty:
             continue
 
-        # Candidate restriction (Senate only if configured)
-        if SENATE_ONLY:
-            chunk = chunk[chunk["CAND_ID"].isin(valid_cand_ids)]
-            if chunk.empty:
-                continue
+        # Exclude independent expenditures
+        chunk = chunk[~chunk["TRANSACTION_TP"].isin(["24E", "24A"])]
+        if chunk.empty:
+            continue
 
-        # Map committee type
+        # ✅ Drop House candidates
+        chunk = chunk[chunk["CAND_ID"].isin(valid_cand_ids)]
+        if chunk.empty:
+            continue
+
         chunk = chunk.copy()
-        chunk["CMTE_TP"] = chunk["CMTE_ID"].map(cm_type)
+        chunk["ORG_TP"] = chunk["CMTE_ID"].map(org_type).fillna("")
 
-        # Amount numeric and positive only (avoid refunds/negatives for "support")
         amt = pd.to_numeric(chunk["TRANSACTION_AMT"], errors="coerce")
         mask = amt.notna() & (amt > 0)
         if not mask.any():
@@ -67,15 +77,15 @@ def main():
         chunk = chunk.loc[mask]
         chunk["AMT"] = amt.loc[mask]
 
-        # Corporate-connected PACs (FEC CMTE_TP = 'C')
-        corp = chunk[chunk["CMTE_TP"] == "C"]
+        # Corporate-connected PACs
+        corp = chunk[chunk["ORG_TP"] == "C"]
         if not corp.empty:
             grp = corp["AMT"].groupby(corp["CAND_ID"]).sum()
             for cand_id, val in grp.items():
                 corp_totals[cand_id] = corp_totals.get(cand_id, 0.0) + float(val)
 
-        # Nonconnected PACs (FEC CMTE_TP = 'N')
-        nonconn = chunk[chunk["CMTE_TP"] == "N"]
+        # Nonconnected PACs
+        nonconn = chunk[chunk["ORG_TP"] == ""]
         if not nonconn.empty:
             grp = nonconn["AMT"].groupby(nonconn["CAND_ID"]).sum()
             for cand_id, val in grp.items():
@@ -83,12 +93,13 @@ def main():
 
         if i % 5 == 0:
             print(
-                f"[pac_support_corp_union] chunks: {i:,} | "
+                f"[pac_support] chunks: {i:,} | "
                 f"corp cands: {len(corp_totals):,} | nonconn cands: {len(nonconn_totals):,}"
             )
 
+    all_cands = sorted(set(corp_totals) | set(nonconn_totals))
     out = (
-        pd.DataFrame({"CAND_ID": list(set(corp_totals) | set(nonconn_totals))})
+        pd.DataFrame({"CAND_ID": all_cands}, columns=["CAND_ID"])
           .assign(
               CORP_PAC_SUPPORT=lambda d: d["CAND_ID"].map(corp_totals).fillna(0.0),
               NONCONNECTED_PAC_SUPPORT=lambda d: d["CAND_ID"].map(nonconn_totals).fillna(0.0),
@@ -99,7 +110,7 @@ def main():
 
     out_path = OUT_DIR / "pac_support_corp_nonconnected.csv"
     out.to_csv(out_path, index=False)
-    print("[pac_support_corp_union] Wrote:", out_path)
+    print("[pac_support] Wrote:", out_path)
 
 if __name__ == "__main__":
     main()
