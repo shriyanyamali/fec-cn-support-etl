@@ -1,2 +1,6 @@
+# Python Cache
 __pycache__/
 *.py[cod]
+
+# Code for Pres and Senate Aggregated Data
+old/
